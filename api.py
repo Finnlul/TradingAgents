@@ -2,6 +2,7 @@ import os
 import uuid
 import threading
 import traceback
+import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -46,8 +47,8 @@ API_KEY = (
 
 app = FastAPI(
     title="TradingAgents Enterprise Command Center",
-    version="4.2.0",
-    description="Multi-Agent Market Analysis Orchestrator with Job History & Suggestions",
+    version="4.5.0",
+    description="Multi-Agent Market Analysis Orchestrator with Detailed Debug Logs & JSON Export",
 )
 
 
@@ -405,8 +406,18 @@ def get_job_status(job_id: str, request: Request):
         return job
 
 
+@app.get("/api/jobs/{job_id}/debug")
+def get_job_debug_logs(job_id: str, request: Request):
+    check_password(request)
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Analysis job not found.")
+        return {"job_id": job_id, "debug_logs": job["debug_logs"]}
+
+
 # ============================================================
-# COMPLETE ENTERPRISE DASHBOARD UI
+# COMPLETE ENTERPRISE DASHBOARD UI WITH JSON EXPORT & DEBUG
 # ============================================================
 
 HTML = r"""
@@ -494,6 +505,7 @@ HTML = r"""
         .card-title {
             font-size: 13px; font-weight: 700; text-transform: uppercase;
             letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 12px;
+            display: flex; justify-content: space-between; align-items: center;
         }
 
         label { display: block; font-size: 11px; font-weight: 600; color: var(--text-muted); margin: 10px 0 4px; }
@@ -509,6 +521,12 @@ HTML = r"""
             font-weight: 700; cursor: pointer; margin-top: 16px; transition: opacity 0.2s ease;
         }
         .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .btn-secondary {
+            background: var(--bg-elevated); border: 1px solid var(--border-bright); color: var(--text-main);
+            padding: 6px 12px; border-radius: 6px; font-size: 11px; font-weight: 600; cursor: pointer;
+        }
+        .btn-secondary:hover { background: var(--border-subtle); }
 
         .job-history-list {
             max-height: 240px;
@@ -608,7 +626,10 @@ HTML = r"""
                 <p>Multi-Agent Financial Intelligence Orchestration</p>
             </div>
         </div>
-        <div id="gatewayStatus" style="font-size: 12px; color: var(--accent-emerald);">● Online</div>
+        <div style="display: flex; gap: 10px; align-items: center;">
+            <button class="btn-secondary" onclick="exportJobJSON()">📥 Export Job JSON</button>
+            <div id="gatewayStatus" style="font-size: 12px; color: var(--accent-emerald);">● Online</div>
+        </div>
     </header>
 
     <div class="metrics-bar">
@@ -630,7 +651,7 @@ HTML = r"""
         <aside>
             <div class="card">
                 <div class="card-title">Launch Pipeline</div>
-                <label>Equity / Ticker (mit Vorschlägen)</label>
+                <label>Equity / Ticker</label>
                 <input id="inputTicker" type="text" list="tickerSuggestions" placeholder="z.B. SAP, NVDA, AAPL">
                 <datalist id="tickerSuggestions">
                     <option value="SAP">SAP SE</option>
@@ -659,6 +680,7 @@ HTML = r"""
         <main>
             <div class="tabs-nav">
                 <button class="tab-btn active" onclick="switchTab('tabEvents', event)">Workflow Events</button>
+                <button class="tab-btn" onclick="switchTab('tabDebug', event)">Detailed Debug Logs</button>
                 <button class="tab-btn" onclick="switchTab('tabReports', event)">Intelligence Reports</button>
                 <button class="tab-btn" onclick="switchTab('tabDecision', event)">Decision & Mandate</button>
             </div>
@@ -667,6 +689,16 @@ HTML = r"""
                 <div class="card">
                     <div class="card-title">Telemetry Feed</div>
                     <div id="eventsFeed" class="logs-window">Warte auf Start...</div>
+                </div>
+            </div>
+
+            <div id="tabDebug" class="tab-content">
+                <div class="card">
+                    <div class="card-title">
+                        <span>Engine Debug Stream</span>
+                        <button class="btn-secondary" onclick="loadDebugLogs()">🔄 Refresh Debug</button>
+                    </div>
+                    <div id="debugFeed" class="logs-window">Keine Debug-Daten geladen.</div>
                 </div>
             </div>
 
@@ -696,6 +728,7 @@ HTML = r"""
 <script>
 let activeJobId = null;
 let pollHandle = null;
+let currentJobData = null;
 
 function getAuthHeader() {
     const pwd = localStorage.getItem("ta_passkey") || "";
@@ -728,6 +761,7 @@ function switchTab(tabId, evt) {
     document.querySelectorAll(".tab-content").forEach(c => c.classList.remove("active"));
     if (evt && evt.target) evt.target.classList.add("active");
     document.getElementById(tabId).classList.add("active");
+    if(tabId === 'tabDebug') loadDebugLogs();
 }
 
 document.getElementById("inputDate").value = new Date().toISOString().slice(0, 10);
@@ -756,6 +790,44 @@ async function selectJob(jobId) {
     if (pollHandle) clearTimeout(pollHandle);
     loadHistory();
     poll();
+}
+
+async function loadDebugLogs() {
+    if(!activeJobId) {
+        document.getElementById("debugFeed").innerHTML = "Kein Job ausgewählt.";
+        return;
+    }
+    try {
+        const data = await request(`/api/jobs/${activeJobId}/debug`);
+        const feed = document.getElementById("debugFeed");
+        if(!data.debug_logs || !data.debug_logs.length) {
+        	feed.innerHTML = "Keine Debug-Einträge vorhanden.";
+        	return;
+        }
+        feed.innerHTML = data.debug_logs.map(log => `
+            <div class="log-entry ${log.level === 'ERROR' ? 'error' : ''}">
+                <span style="color: var(--text-dim);">${new Date(log.time).toLocaleTimeString()}</span>
+                <span style="color: var(--accent-indigo);">[${escapeHtml(log.source)}]</span>
+                <span>${escapeHtml(log.message)}</span>
+            </div>
+        `).join("");
+    } catch(e) {
+        document.getElementById("debugFeed").innerHTML = "Fehler beim Laden der Debug-Logs: " + escapeHtml(e.message);
+    }
+}
+
+function exportJobJSON() {
+    if(!currentJobData) {
+        alert("Keine Job-Daten zum Exportieren vorhanden.");
+        return;
+    }
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(currentJobData, null, 2));
+    const downloadAnchor = document.createElement('a');
+    downloadAnchor.setAttribute("href", dataStr);
+    downloadAnchor.setAttribute("download", `tradingagents_job_${currentJobData.ticker}_${currentJobData.id.slice(0,8)}.json`);
+    document.body.appendChild(downloadAnchor);
+    downloadAnchor.click();
+    downloadAnchor.remove();
 }
 
 async function launchAnalysis() {
@@ -788,6 +860,7 @@ async function poll() {
     if (!activeJobId) return;
     try {
         const job = await request(`/api/jobs/${activeJobId}`);
+        currentJobData = job;
         renderJob(job);
         loadHistory();
         if (job.status === "running" || job.status === "queued") {
