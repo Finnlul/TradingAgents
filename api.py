@@ -3,12 +3,13 @@ import uuid
 import threading
 import traceback
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
+# TradingAgents Module
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
@@ -45,18 +46,18 @@ API_KEY = (
 
 app = FastAPI(
     title="TradingAgents Enterprise Command Center",
-    version="4.1.0",
+    version="4.2.0",
     description="Multi-Agent Market Analysis Orchestrator with Job History & Suggestions",
 )
 
 
 # ============================================================
-# EXTENDED DEBUG LOGGING & JOB STORAGE
+# EXTENDED DEBUG LOGGING & JOB STORAGE (THREAD-SAFE)
 # ============================================================
 
 jobs: Dict[str, Dict[str, Any]] = {}
 jobs_lock = threading.Lock()
-MAX_JOBS_RETAINED = 50
+MAX_JOBS_RETAINED = 100
 
 
 def utc_now() -> str:
@@ -197,7 +198,17 @@ def serialize_result(value: Any) -> Any:
 
 
 def extract_agent_reports(final_state: Any) -> Dict[str, Any]:
-    reports = {}
+    reports = {
+        "market": None,
+        "fundamentals": None,
+        "technical": None,
+        "sentiment": None,
+        "news": None,
+        "bull_case": None,
+        "bear_case": None,
+        "debate_summary": None,
+        "risk_assessment": None,
+    }
     if not isinstance(final_state, dict):
         return reports
 
@@ -225,7 +236,7 @@ def extract_agent_reports(final_state: Any) -> Dict[str, Any]:
 
 
 # ============================================================
-# AUTHENTICATION
+# AUTHENTICATION & VALIDATION
 # ============================================================
 
 def check_password(request: Request):
@@ -236,27 +247,19 @@ def check_password(request: Request):
         raise HTTPException(status_code=401, detail="Invalid authorization token or password.")
 
 
-# ============================================================
-# SCHEMAS
-# ============================================================
+def validate_llm_config():
+    if not MODEL:
+        raise RuntimeError("TRADINGAGENTS_MODEL is not set.")
+    if not BACKEND_URL:
+        raise RuntimeError("OMNIROUTER_BASE_URL (or backend base URL) is missing.")
+    if not API_KEY:
+        raise RuntimeError("OMNIROUTER_API_KEY (or OpenAI key) is missing.")
+
 
 class AnalyzeRequest(BaseModel):
     ticker: str = Field(..., min_length=1, max_length=30)
     analysis_date: Optional[str] = None
     debug_mode: Optional[bool] = True
-
-
-# ============================================================
-# LLM VALIDATION
-# ============================================================
-
-def validate_llm_config():
-    if not MODEL:
-        raise RuntimeError("TRADINGAGENTS_MODEL is not set.")
-    if not BACKEND_URL:
-        raise RuntimeError("OMNIROUTER_BASE_URL is missing.")
-    if not API_KEY:
-        raise RuntimeError("OMNIROUTER_API_KEY is missing.")
 
 
 # ============================================================
@@ -292,6 +295,7 @@ def run_analysis(job_id: str, ticker: str, analysis_date: str):
         add_event(job_id, "Workflow graph compiled. Executing evaluation steps...", "System", "Execution", 20)
         target_date = analysis_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
         
+        # Blocking Multi-Agent Propagation
         final_state, decision = ta.propagate(ticker, target_date)
 
         serialized_decision = serialize_result(decision)
@@ -326,7 +330,7 @@ def run_analysis(job_id: str, ticker: str, analysis_date: str):
         error_msg = safe_string(exc)
         tb = traceback.format_exc()
         log_debug(job_id, f"Execution failed: {error_msg}\n{tb}", level="ERROR", source="WorkerException")
-        add_event(job_id, f"Analysis aborted: {error_msg}", "System", "Failure", level="ERROR")
+        add_event(job_id, f"Analysis aborted: {error_msg}", "System", "Failure", progress=100, level="ERROR")
         update_job(
             job_id,
             status="failed",
@@ -357,12 +361,12 @@ def api_config(request: Request):
 def list_jobs(request: Request):
     check_password(request)
     with jobs_lock:
-        # Kurzübersicht aller Jobs für die Historie zurückgeben
         summary = [
             {
                 "id": j["id"],
                 "ticker": j["ticker"],
                 "status": j["status"],
+                "progress": j["progress"],
                 "started_at": j["started_at"],
                 "current_phase": j["current_phase"]
             }
@@ -402,7 +406,7 @@ def get_job_status(job_id: str, request: Request):
 
 
 # ============================================================
-# WEB UI (HTML / CSS / JS)
+# COMPLETE ENTERPRISE DASHBOARD UI
 # ============================================================
 
 HTML = r"""
@@ -502,13 +506,12 @@ HTML = r"""
         .btn-primary {
             width: 100%; background: linear-gradient(135deg, var(--accent-blue), var(--accent-indigo));
             border: none; color: white; padding: 12px; border-radius: 8px; font-size: 13px;
-            font-weight: 700; cursor: pointer; margin-top: 16px;
+            font-weight: 700; cursor: pointer; margin-top: 16px; transition: opacity 0.2s ease;
         }
         .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
-        /* Job History List */
         .job-history-list {
-            max-height: 220px;
+            max-height: 240px;
             overflow-y: auto;
             display: flex;
             flex-direction: column;
@@ -524,12 +527,14 @@ HTML = r"""
             display: flex;
             justify-content: space-between;
             align-items: center;
+            transition: all 0.2s ease;
         }
         .job-item:hover, .job-item.active { border-color: var(--accent-blue); background: var(--bg-elevated); }
         .badge { font-size: 10px; padding: 2px 6px; border-radius: 4px; font-family: monospace; }
         .badge.completed { background: rgba(16, 185, 129, 0.2); color: var(--accent-emerald); }
         .badge.running { background: rgba(56, 189, 248, 0.2); color: var(--accent-blue); }
         .badge.failed { background: rgba(244, 63, 94, 0.2); color: var(--accent-rose); }
+        .badge.queued { background: rgba(245, 158, 11, 0.2); color: var(--accent-amber); }
 
         .metrics-bar {
             display: grid;
@@ -563,16 +568,17 @@ HTML = r"""
 
         .logs-window {
             background: var(--bg-base); border: 1px solid var(--border-subtle);
-            border-radius: 10px; height: 380px; overflow-y: auto; padding: 12px;
+            border-radius: 10px; height: 420px; overflow-y: auto; padding: 12px;
             font-family: 'JetBrains Mono', monospace; font-size: 11px; line-height: 1.5;
         }
-        .log-entry { padding: 3px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.02); }
+        .log-entry { padding: 4px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.03); }
+        .log-entry.error { color: var(--accent-rose); }
 
-        .report-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
-        .report-card { background: var(--bg-base); border: 1px solid var(--border-subtle); border-radius: 10px; padding: 12px; }
+        .report-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+        .report-card { background: var(--bg-base); border: 1px solid var(--border-subtle); border-radius: 10px; padding: 14px; }
         .report-card h4 { font-size: 12px; color: var(--accent-blue); margin-bottom: 8px; text-transform: uppercase; }
 
-        pre { background: var(--bg-base); border: 1px solid var(--border-subtle); padding: 12px; border-radius: 8px; font-family: monospace; font-size: 11px; overflow-x: auto; max-height: 400px; }
+        pre { background: var(--bg-surface); border: 1px solid var(--border-subtle); padding: 12px; border-radius: 8px; font-family: 'JetBrains Mono', monospace; font-size: 11px; overflow-x: auto; max-height: 400px; color: var(--text-muted); }
 
         .auth-overlay {
             position: fixed; inset: 0; background: rgba(6, 9, 14, 0.95);
@@ -599,7 +605,7 @@ HTML = r"""
             <div class="logo-badge">TA</div>
             <div class="title-group">
                 <h1>TradingAgents Command Center</h1>
-                <p>Multi-Agent Financial Intelligence</p>
+                <p>Multi-Agent Financial Intelligence Orchestration</p>
             </div>
         </div>
         <div id="gatewayStatus" style="font-size: 12px; color: var(--accent-emerald);">● Online</div>
@@ -669,9 +675,12 @@ HTML = r"""
                     <div class="report-card"><h4>Market Context</h4><div id="repMarket" class="text-dim">Keine Daten</div></div>
                     <div class="report-card"><h4>Fundamentals</h4><div id="repFundamentals" class="text-dim">Keine Daten</div></div>
                     <div class="report-card"><h4>Technical Overview</h4><div id="repTechnical" class="text-dim">Keine Daten</div></div>
-                    <div class="report-card"><h4>Sentiment & News</h4><div id="repSentiment" class="text-dim">Keine Daten</div></div>
+                    <div class="report-card"><h4>Sentiment</h4><div id="repSentiment" class="text-dim">Keine Daten</div></div>
+                    <div class="report-card"><h4>News</h4><div id="repNews" class="text-dim">Keine Daten</div></div>
                     <div class="report-card"><h4>Bull Thesis</h4><div id="repBull" class="text-dim">Keine Daten</div></div>
                     <div class="report-card"><h4>Bear Thesis</h4><div id="repBear" class="text-dim">Keine Daten</div></div>
+                    <div class="report-card"><h4>Debate Summary</h4><div id="repDebate" class="text-dim">Keine Daten</div></div>
+                    <div class="report-card"><h4>Risk Assessment</h4><div id="repRisk" class="text-dim">Keine Daten</div></div>
                 </div>
             </div>
 
@@ -800,21 +809,37 @@ function renderJob(job) {
     document.getElementById("progressPhaseText").textContent = `Status: ${job.current_phase}`;
 
     if (job.events) {
-        document.getElementById("eventsFeed").innerHTML = job.events.map(ev => `
-            <div class="log-entry">
+        const feed = document.getElementById("eventsFeed");
+        const isAtBottom = feed.scrollHeight - feed.scrollTop <= feed.clientHeight + 40;
+        
+        feed.innerHTML = job.events.map(ev => `
+            <div class="log-entry ${ev.level === 'ERROR' ? 'error' : ''}">
                 <span style="color: var(--text-dim);">${new Date(ev.time).toLocaleTimeString()}</span>
                 <span style="color: var(--accent-blue);">[${escapeHtml(ev.agent)}]</span>
                 <span>${escapeHtml(ev.message)}</span>
             </div>
         `).join("");
+        
+        if (isAtBottom) feed.scrollTop = feed.scrollHeight;
     }
 
     if (job.reports) {
-        const map = { market: "repMarket", fundamentals: "repFundamentals", technical: "repTechnical", sentiment: "repSentiment", bull_case: "repBull", bear_case: "repBear" };
+        const map = { 
+            market: "repMarket", 
+            fundamentals: "repFundamentals", 
+            technical: "repTechnical", 
+            sentiment: "repSentiment", 
+            news: "repNews", 
+            bull_case: "repBull", 
+            bear_case: "repBear",
+            debate_summary: "repDebate",
+            risk_assessment: "repRisk"
+        };
         for (const [k, id] of Object.entries(map)) {
-            if (job.reports[k]) {
+            const el = document.getElementById(id);
+            if (el && job.reports[k]) {
                 const val = job.reports[k];
-                document.getElementById(id).innerHTML = `<pre>${escapeHtml(typeof val === "object" ? JSON.stringify(val, null, 2) : val)}</pre>`;
+                el.innerHTML = `<pre>${escapeHtml(typeof val === "object" ? JSON.stringify(val, null, 2) : val)}</pre>`;
             }
         }
     }
@@ -825,6 +850,13 @@ function renderJob(job) {
                 <h3 style="color: var(--accent-emerald);">MANDAT ERTEILT</h3>
             </div>
             <pre>${escapeHtml(JSON.stringify(job.result.decision, null, 2))}</pre>
+        `;
+    } else if (job.error) {
+        document.getElementById("decisionView").innerHTML = `
+            <div style="background: rgba(244, 63, 94, 0.1); border: 1px solid var(--accent-rose); padding: 16px; border-radius: 10px; margin-bottom: 12px;">
+                <h3 style="color: var(--accent-rose);">PIPELINE FEHLGESCHLAGEN</h3>
+            </div>
+            <pre>${escapeHtml(JSON.stringify(job.error, null, 2))}</pre>
         `;
     }
 }
