@@ -30,10 +30,13 @@ def health():
 
 @app.post("/analyze")
 def analyze(request: AnalysisRequest):
-    ticker = request.ticker.upper().strip()
+    ticker = request.ticker.strip().upper()
 
     if not ticker:
-        raise HTTPException(status_code=400, detail="Ticker is required")
+        raise HTTPException(
+            status_code=400,
+            detail="Ticker is required"
+        )
 
     analysis_date = request.analysis_date or date.today().isoformat()
 
