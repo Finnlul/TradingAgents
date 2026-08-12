@@ -19,26 +19,38 @@ from tradingagents.graph.trading_graph import TradingAgentsGraph
 
 APP_PASSWORD = os.getenv("APP_PASSWORD", "")
 
+# ------------------------------------------------------------
+# OMNIROUTER
+# ------------------------------------------------------------
+#
+# Render Environment Variables:
+#
+# OMNIROUTER_BASE_URL=DEINE_OMNIROUTER_URL/v1
+# OMNIROUTER_API_KEY=DEIN_OMNIROUTER_KEY
+# TRADINGAGENTS_MODEL=DEIN_OPENROUTER_MODELL
+#
+# Beispiel:
+#
+# TRADINGAGENTS_MODEL=openai/gpt-4o
+#
+# KEIN nvidia/... Default mehr.
+# ------------------------------------------------------------
+
 MODEL = os.getenv(
-    "TRADINGAGENTS_DEEP_THINK_LLM",
-    os.getenv(
-        "TRADINGAGENTS_QUICK_THINK_LLM",
-        "nvidia/nemotron-3-ultra-550b-a55b:free",
-    ),
+    "TRADINGAGENTS_MODEL",
+    "",
 )
 
-# Force OpenAI-compatible mode.
-# This is important for OmniRouter / OpenAI-compatible gateways.
 BACKEND_URL = (
-    os.getenv("TRADINGAGENTS_LLM_BACKEND_URL")
+    os.getenv("OMNIROUTER_BASE_URL")
+    or os.getenv("TRADINGAGENTS_LLM_BACKEND_URL")
     or os.getenv("OPENAI_BASE_URL")
-    or os.getenv("BACKEND_URL")
     or ""
 )
 
 API_KEY = (
-    os.getenv("OPENAI_COMPATIBLE_API_KEY")
-    or os.getenv("OPENAI_API_KEY")
+    os.getenv("OMNIROUTER_API_KEY")
+    or os.getenv("OPENAI_COMPATIBLE_API_KEY")
     or ""
 )
 
@@ -48,13 +60,13 @@ API_KEY = (
 # ============================================================
 
 app = FastAPI(
-    title="TradingAgents",
-    version="2.0.0",
+    title="TradingAgents OmniRouter API",
+    version="3.0.0",
 )
 
 
 # ============================================================
-# IN-MEMORY JOB STORAGE
+# JOB STORAGE
 # ============================================================
 
 jobs: dict[str, dict[str, Any]] = {}
@@ -115,12 +127,14 @@ def add_event(
 
         job["events"].append(event)
 
-        # Keep memory under control.
         if len(job["events"]) > 500:
             job["events"] = job["events"][-500:]
 
         if progress is not None:
-            job["progress"] = max(0, min(100, progress))
+            job["progress"] = max(
+                0,
+                min(100, progress),
+            )
 
         job["current_agent"] = agent
 
@@ -133,19 +147,13 @@ def add_event(
 # ============================================================
 
 def check_password(request: Request):
-    """
-    Simple password protection suitable for a personal Render deployment.
-
-    Set:
-        APP_PASSWORD=your-password
-
-    If APP_PASSWORD is empty, authentication is disabled.
-    """
-
     if not APP_PASSWORD:
         return
 
-    supplied = request.headers.get("X-App-Password", "")
+    supplied = request.headers.get(
+        "X-App-Password",
+        "",
+    )
 
     if supplied != APP_PASSWORD:
         raise HTTPException(
@@ -155,16 +163,21 @@ def check_password(request: Request):
 
 
 # ============================================================
-# REQUEST MODELS
+# REQUEST
 # ============================================================
 
 class AnalyzeRequest(BaseModel):
-    ticker: str = Field(..., min_length=1, max_length=30)
+    ticker: str = Field(
+        ...,
+        min_length=1,
+        max_length=30,
+    )
+
     analysis_date: str | None = None
 
 
 # ============================================================
-# HELPERS
+# SERIALIZATION
 # ============================================================
 
 def safe_string(value: Any) -> str:
@@ -181,15 +194,14 @@ def safe_string(value: Any) -> str:
 
 
 def serialize_result(value: Any) -> Any:
-    """
-    Convert arbitrary TradingAgents/LangGraph output
-    into JSON-friendly structures.
-    """
 
     if value is None:
         return None
 
-    if isinstance(value, (str, int, float, bool)):
+    if isinstance(
+        value,
+        (str, int, float, bool),
+    ):
         return value
 
     if isinstance(value, dict):
@@ -198,7 +210,10 @@ def serialize_result(value: Any) -> Any:
             for k, v in value.items()
         }
 
-    if isinstance(value, (list, tuple)):
+    if isinstance(
+        value,
+        (list, tuple),
+    ):
         return [
             serialize_result(v)
             for v in value
@@ -206,13 +221,17 @@ def serialize_result(value: Any) -> Any:
 
     if hasattr(value, "model_dump"):
         try:
-            return serialize_result(value.model_dump())
+            return serialize_result(
+                value.model_dump()
+            )
         except Exception:
             pass
 
     if hasattr(value, "dict"):
         try:
-            return serialize_result(value.dict())
+            return serialize_result(
+                value.dict()
+            )
         except Exception:
             pass
 
@@ -220,16 +239,46 @@ def serialize_result(value: Any) -> Any:
 
 
 # ============================================================
+# CONFIG VALIDATION
+# ============================================================
+
+def validate_llm_config():
+
+    if not MODEL:
+        raise RuntimeError(
+            "TRADINGAGENTS_MODEL is missing. "
+            "Set the exact OpenRouter model ID in Render."
+        )
+
+    if not BACKEND_URL:
+        raise RuntimeError(
+            "OMNIROUTER_BASE_URL is missing. "
+            "Set the OmniRouter OpenAI-compatible /v1 URL in Render."
+        )
+
+    if not API_KEY:
+        raise RuntimeError(
+            "OMNIROUTER_API_KEY is missing. "
+            "Set your OmniRouter API key in Render."
+        )
+
+
+# ============================================================
 # ANALYSIS WORKER
 # ============================================================
 
-def run_analysis(job_id: str, ticker: str, analysis_date: str):
+def run_analysis(
+    job_id: str,
+    ticker: str,
+    analysis_date: str,
+):
 
     try:
+
         update_job(
             job_id,
             status="running",
-            progress=3,
+            progress=2,
         )
 
         add_event(
@@ -237,131 +286,158 @@ def run_analysis(job_id: str, ticker: str, analysis_date: str):
             "Analysis started.",
             "System",
             "Initialization",
-            3,
+            2,
         )
 
         # ----------------------------------------------------
-        # Configuration
+        # Validate
+        # ----------------------------------------------------
+
+        validate_llm_config()
+
+        add_event(
+            job_id,
+            "OmniRouter configuration validated.",
+            "System",
+            "LLM configuration",
+            5,
+        )
+
+        # ----------------------------------------------------
+        # Environment
+        # ----------------------------------------------------
+        #
+        # TradingAgents openai_compatible uses:
+        #
+        # OPENAI_COMPATIBLE_API_KEY
+        #
+        # backend_url comes from config.
+        # ----------------------------------------------------
+
+        os.environ[
+            "OPENAI_COMPATIBLE_API_KEY"
+        ] = API_KEY
+
+        # Also expose the key through OPENAI_API_KEY.
+        # Some OpenAI-compatible client versions
+        # look for this variable.
+        os.environ[
+            "OPENAI_API_KEY"
+        ] = API_KEY
+
+        # ----------------------------------------------------
+        # TradingAgents configuration
         # ----------------------------------------------------
 
         config = DEFAULT_CONFIG.copy()
 
-        # Force the correct provider.
-        config["llm_provider"] = "openai_compatible"
+        config["llm_provider"] = (
+            "openai_compatible"
+        )
 
-        # Same model for both quick and deep agents.
         config["deep_think_llm"] = MODEL
         config["quick_think_llm"] = MODEL
 
-        if BACKEND_URL:
-            config["backend_url"] = BACKEND_URL
-
-        # Some versions use this configuration value.
-        if API_KEY:
-            os.environ["OPENAI_COMPATIBLE_API_KEY"] = API_KEY
+        config["backend_url"] = BACKEND_URL
 
         add_event(
             job_id,
-            f"LLM configured: {MODEL}",
+            f"Model: {MODEL}",
             "System",
             "LLM configuration",
-            6,
+            7,
         )
 
-        if BACKEND_URL:
-            add_event(
-                job_id,
-                "OpenAI-compatible backend detected.",
-                "System",
-                "LLM configuration",
-                8,
-            )
-        else:
-            add_event(
-                job_id,
-                "Warning: no custom backend URL detected.",
-                "System",
-                "LLM configuration",
-                8,
-            )
+        add_event(
+            job_id,
+            f"Gateway: {BACKEND_URL}",
+            "System",
+            "LLM configuration",
+            9,
+        )
+
+        add_event(
+            job_id,
+            "Provider: openai_compatible",
+            "System",
+            "LLM configuration",
+            10,
+        )
 
         # ----------------------------------------------------
-        # Agent map
+        # Workflow
         # ----------------------------------------------------
 
         workflow = [
             (
                 "Market Analyst",
                 "Market analysis",
-                12,
+                15,
             ),
             (
                 "Fundamentals Analyst",
                 "Fundamental analysis",
-                20,
+                23,
             ),
             (
                 "Technical Analyst",
                 "Technical analysis",
-                28,
+                31,
             ),
             (
                 "Sentiment Analyst",
                 "Market sentiment",
-                36,
+                39,
             ),
             (
                 "News Analyst",
                 "News analysis",
-                44,
+                47,
             ),
             (
                 "Bull Researcher",
                 "Bullish research",
-                53,
+                55,
             ),
             (
                 "Bear Researcher",
                 "Bearish research",
-                61,
+                63,
             ),
             (
                 "Research Manager",
                 "Research debate",
-                70,
+                71,
             ),
             (
                 "Trader",
                 "Trading decision",
-                79,
+                80,
             ),
             (
                 "Risk Management",
                 "Risk assessment",
-                89,
+                90,
             ),
             (
                 "Portfolio Manager",
                 "Final portfolio decision",
-                96,
+                97,
             ),
         ]
 
-        # ----------------------------------------------------
-        # Show planned workflow
-        # ----------------------------------------------------
-
         for agent, phase, progress in workflow:
+
             add_event(
                 job_id,
-                f"{agent} is part of the analysis pipeline.",
+                f"{agent} added to workflow.",
                 agent,
                 phase,
                 min(progress - 2, 95),
             )
 
         # ----------------------------------------------------
-        # Create graph
+        # Graph
         # ----------------------------------------------------
 
         add_event(
@@ -369,7 +445,7 @@ def run_analysis(job_id: str, ticker: str, analysis_date: str):
             "Initializing TradingAgents graph...",
             "System",
             "Graph initialization",
-            10,
+            11,
         )
 
         ta = TradingAgentsGraph(
@@ -382,29 +458,42 @@ def run_analysis(job_id: str, ticker: str, analysis_date: str):
             "TradingAgents graph initialized.",
             "System",
             "Graph initialization",
-            12,
+            13,
         )
 
         # ----------------------------------------------------
         # Actual analysis
         # ----------------------------------------------------
 
+        ticker = ticker.upper().strip()
+
         add_event(
             job_id,
-            f"Starting multi-agent analysis for {ticker.upper()}.",
+            f"Starting analysis for {ticker}.",
             "Market Analyst",
             "Analysis",
             15,
         )
 
         final_state, decision = ta.propagate(
-            ticker.upper(),
+            ticker,
             analysis_date,
         )
 
         # ----------------------------------------------------
-        # Completed
+        # Result
         # ----------------------------------------------------
+
+        result = {
+            "ticker": ticker,
+            "analysis_date": analysis_date,
+            "decision": serialize_result(
+                decision
+            ),
+            "final_state": serialize_result(
+                final_state
+            ),
+        }
 
         add_event(
             job_id,
@@ -413,13 +502,6 @@ def run_analysis(job_id: str, ticker: str, analysis_date: str):
             "Complete",
             100,
         )
-
-        result = {
-            "ticker": ticker.upper(),
-            "analysis_date": analysis_date,
-            "decision": serialize_result(decision),
-            "final_state": serialize_result(final_state),
-        }
 
         update_job(
             job_id,
@@ -434,7 +516,6 @@ def run_analysis(job_id: str, ticker: str, analysis_date: str):
     except Exception as exc:
 
         error_text = safe_string(exc)
-
         traceback_text = traceback.format_exc()
 
         add_event(
@@ -444,50 +525,72 @@ def run_analysis(job_id: str, ticker: str, analysis_date: str):
             "Error",
         )
 
-        # Don't expose full secrets/environment.
-        safe_traceback = traceback_text
-
         update_job(
             job_id,
             status="failed",
             finished_at=utc_now(),
             error={
                 "message": error_text,
-                "traceback": safe_traceback,
+                "traceback": traceback_text,
             },
         )
 
 
 # ============================================================
-# API
+# HEALTH
 # ============================================================
 
 @app.get("/health")
 def health():
+
     return {
         "status": "healthy",
-        "tradingagents": "ready",
-        "llm_provider": "openai_compatible",
-        "model": MODEL,
-        "backend_configured": bool(BACKEND_URL),
-        "api_key_configured": bool(API_KEY),
+        "service": "TradingAgents API",
+        "provider": "openai_compatible",
+        "model": MODEL or None,
+        "backend_configured": bool(
+            BACKEND_URL
+        ),
+        "api_key_configured": bool(
+            API_KEY
+        ),
     }
 
+
+# ============================================================
+# CONFIG API
+# ============================================================
 
 @app.get("/api/config")
 def api_config(request: Request):
+
     check_password(request)
 
     return {
-        "model": MODEL,
+        "model": MODEL or "Not configured",
         "provider": "openai_compatible",
-        "backend_configured": bool(BACKEND_URL),
-        "password_enabled": bool(APP_PASSWORD),
+        "backend_configured": bool(
+            BACKEND_URL
+        ),
+        "api_key_configured": bool(
+            API_KEY
+        ),
+        "password_enabled": bool(
+            APP_PASSWORD
+        ),
     }
 
 
+# ============================================================
+# START ANALYSIS
+# ============================================================
+
 @app.post("/api/analyze")
-def analyze(data: AnalyzeRequest, request: Request):
+def analyze(
+    data: AnalyzeRequest,
+    request: Request,
+):
+
     check_password(request)
 
     ticker = data.ticker.strip().upper()
@@ -501,6 +604,7 @@ def analyze(data: AnalyzeRequest, request: Request):
     analysis_date = data.analysis_date
 
     if not analysis_date:
+
         analysis_date = datetime.now(
             timezone.utc
         ).strftime("%Y-%m-%d")
@@ -528,11 +632,20 @@ def analyze(data: AnalyzeRequest, request: Request):
     }
 
 
+# ============================================================
+# JOB STATUS
+# ============================================================
+
 @app.get("/api/jobs/{job_id}")
-def job_status(job_id: str, request: Request):
+def job_status(
+    job_id: str,
+    request: Request,
+):
+
     check_password(request)
 
     with jobs_lock:
+
         job = jobs.get(job_id)
 
         if not job:
@@ -545,291 +658,194 @@ def job_status(job_id: str, request: Request):
 
 
 # ============================================================
-# UI
+# SIMPLE WEB UI
 # ============================================================
 
 HTML = r"""
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
+
 <meta charset="UTF-8">
+
 <meta
     name="viewport"
     content="width=device-width, initial-scale=1.0"
-/>
+>
 
 <title>TradingAgents Command Center</title>
 
 <style>
 
 :root {
-    --bg: #070b14;
-    --panel: rgba(15, 22, 38, .88);
-    --panel2: rgba(20, 29, 48, .92);
-    --border: rgba(255,255,255,.09);
-    --text: #f4f7fb;
-    --muted: #8f9bb0;
-    --green: #35e69a;
-    --blue: #5b8cff;
-    --purple: #a78bfa;
-    --yellow: #f6c85f;
-    --red: #ff5d73;
-    --shadow: 0 20px 60px rgba(0,0,0,.35);
+    --bg:#070b14;
+    --panel:#10182a;
+    --border:#26324a;
+    --text:#f5f7fb;
+    --muted:#8995aa;
+    --blue:#5b8cff;
+    --purple:#9b72ff;
+    --green:#35e69a;
+    --red:#ff6075;
 }
 
 * {
-    box-sizing: border-box;
+    box-sizing:border-box;
 }
 
 body {
-    margin: 0;
-    min-height: 100vh;
-    font-family:
-        Inter,
-        ui-sans-serif,
-        system-ui,
-        -apple-system,
-        BlinkMacSystemFont,
-        "Segoe UI",
-        sans-serif;
-
-    color: var(--text);
-
+    margin:0;
     background:
         radial-gradient(
-            circle at 15% 0%,
-            rgba(91,140,255,.18),
-            transparent 35%
-        ),
-        radial-gradient(
-            circle at 90% 10%,
-            rgba(167,139,250,.14),
-            transparent 30%
+            circle at top left,
+            #172650,
+            transparent 40%
         ),
         var(--bg);
+    color:var(--text);
+    font-family:
+        Inter,
+        system-ui,
+        -apple-system,
+        sans-serif;
 }
 
 .container {
-    width: min(1500px, calc(100% - 32px));
-    margin: 0 auto;
-    padding: 24px 0 50px;
+    width:min(1400px, calc(100% - 30px));
+    margin:auto;
+    padding:25px 0 50px;
 }
 
 .header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 20px;
-    margin-bottom: 24px;
-}
-
-.brand {
-    display: flex;
-    gap: 14px;
-    align-items: center;
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    margin-bottom:20px;
 }
 
 .logo {
-    width: 48px;
-    height: 48px;
-    display: grid;
-    place-items: center;
-    border-radius: 14px;
-
+    width:45px;
+    height:45px;
+    border-radius:12px;
+    display:grid;
+    place-items:center;
+    font-weight:900;
     background:
         linear-gradient(
             135deg,
             var(--blue),
             var(--purple)
         );
-
-    box-shadow:
-        0 10px 35px rgba(91,140,255,.28);
 }
 
-.brand h1 {
-    margin: 0;
-    font-size: 22px;
+.brand {
+    display:flex;
+    align-items:center;
+    gap:12px;
 }
 
-.brand p {
-    margin: 3px 0 0;
-    color: var(--muted);
-    font-size: 13px;
+h1 {
+    margin:0;
+    font-size:22px;
 }
 
-.badge {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 9px 13px;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    background: rgba(255,255,255,.035);
-    color: var(--muted);
-    font-size: 13px;
-}
-
-.dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--green);
-    box-shadow: 0 0 15px var(--green);
+.subtitle {
+    color:var(--muted);
+    font-size:12px;
+    margin-top:3px;
 }
 
 .grid {
-    display: grid;
-    grid-template-columns: 360px 1fr;
-    gap: 18px;
+    display:grid;
+    grid-template-columns:330px 1fr;
+    gap:18px;
 }
 
 .card {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 20px;
-    box-shadow: var(--shadow);
-    backdrop-filter: blur(18px);
+    background:rgba(16,24,42,.9);
+    border:1px solid var(--border);
+    border-radius:18px;
+    padding:20px;
 }
 
-.controls {
-    padding: 22px;
-    height: fit-content;
-}
-
-.controls h2,
-.card-title {
-    margin: 0;
-    font-size: 16px;
-}
-
-.label {
-    display: block;
-    margin: 20px 0 8px;
-    color: var(--muted);
-    font-size: 12px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: .08em;
+label {
+    display:block;
+    color:var(--muted);
+    font-size:12px;
+    margin:18px 0 7px;
 }
 
 input {
-    width: 100%;
-    border: 1px solid var(--border);
-    outline: none;
-    color: var(--text);
-    background: rgba(255,255,255,.045);
-    border-radius: 12px;
-    padding: 13px 14px;
-    font-size: 15px;
-}
-
-input:focus {
-    border-color: rgba(91,140,255,.7);
-    box-shadow: 0 0 0 3px rgba(91,140,255,.12);
+    width:100%;
+    padding:13px;
+    border-radius:10px;
+    border:1px solid var(--border);
+    background:#080e1c;
+    color:white;
+    outline:none;
 }
 
 button {
-    width: 100%;
-    border: 0;
-    border-radius: 13px;
-    padding: 14px 18px;
-    margin-top: 18px;
-
-    color: white;
-    font-weight: 750;
-    font-size: 14px;
-
-    cursor: pointer;
-
+    width:100%;
+    margin-top:18px;
+    padding:14px;
+    border:0;
+    border-radius:10px;
+    color:white;
+    font-weight:800;
+    cursor:pointer;
     background:
         linear-gradient(
             135deg,
-            #4d7dff,
-            #8b5cf6
+            var(--blue),
+            var(--purple)
         );
-
-    box-shadow:
-        0 12px 30px rgba(91,140,255,.22);
-}
-
-button:hover {
-    filter: brightness(1.08);
 }
 
 button:disabled {
-    opacity: .5;
-    cursor: not-allowed;
+    opacity:.5;
 }
 
-.info {
-    margin-top: 18px;
-    padding: 13px;
-    border-radius: 13px;
-    background: rgba(255,255,255,.035);
-    color: var(--muted);
-    font-size: 12px;
-    line-height: 1.6;
-}
-
-.main {
-    min-width: 0;
-}
-
-.top-cards {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 14px;
-    margin-bottom: 18px;
+.metrics {
+    display:grid;
+    grid-template-columns:repeat(4,1fr);
+    gap:12px;
+    margin-bottom:15px;
 }
 
 .metric {
-    padding: 17px;
+    padding:15px;
 }
 
-.metric-label {
-    color: var(--muted);
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: .08em;
+.metric small {
+    color:var(--muted);
+    display:block;
 }
 
-.metric-value {
-    margin-top: 7px;
-    font-size: 18px;
-    font-weight: 750;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+.metric strong {
+    display:block;
+    margin-top:7px;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
 }
 
-.progress-card {
-    padding: 20px;
-    margin-bottom: 18px;
+.progress {
+    margin-bottom:15px;
 }
 
-.progress-head {
-    display: flex;
-    justify-content: space-between;
-    gap: 15px;
+.track {
+    height:8px;
+    background:#080e1c;
+    border-radius:20px;
+    overflow:hidden;
+    margin-top:14px;
 }
 
-.progress-number {
-    color: var(--blue);
-    font-weight: 800;
-}
-
-.progress-track {
-    height: 8px;
-    margin-top: 16px;
-    background: rgba(255,255,255,.06);
-    border-radius: 99px;
-    overflow: hidden;
-}
-
-.progress-bar {
-    height: 100%;
-    width: 0%;
+.bar {
+    height:100%;
+    width:0%;
     background:
         linear-gradient(
             90deg,
@@ -837,268 +853,217 @@ button:disabled {
             var(--purple),
             var(--green)
         );
-    transition: width .5s ease;
+    transition:.4s;
 }
 
-.agent-window {
-    padding: 20px;
-    margin-bottom: 18px;
+.agent {
+    display:flex;
+    align-items:center;
+    gap:12px;
+    margin-top:15px;
+    padding:15px;
+    border-radius:12px;
+    background:#0b1222;
 }
 
-.agent-status {
-    display: flex;
-    align-items: center;
-    gap: 13px;
-    padding: 16px;
-    margin-top: 15px;
-    border-radius: 15px;
-    background:
-        linear-gradient(
-            90deg,
-            rgba(91,140,255,.12),
-            rgba(167,139,250,.06)
-        );
-    border: 1px solid rgba(91,140,255,.14);
-}
-
-.agent-avatar {
-    width: 42px;
-    height: 42px;
-    flex: 0 0 42px;
-
-    display: grid;
-    place-items: center;
-
-    border-radius: 12px;
-
-    background:
-        linear-gradient(
-            135deg,
-            rgba(91,140,255,.25),
-            rgba(167,139,250,.25)
-        );
-}
-
-.agent-name {
-    font-weight: 800;
-}
-
-.agent-phase {
-    color: var(--muted);
-    margin-top: 3px;
-    font-size: 12px;
+.agent-icon {
+    width:42px;
+    height:42px;
+    display:grid;
+    place-items:center;
+    border-radius:10px;
+    background:#1b2946;
 }
 
 .live {
-    margin-left: auto;
-    color: var(--green);
-    font-size: 11px;
-    font-weight: 800;
+    margin-left:auto;
+    color:var(--green);
+    font-size:11px;
+    font-weight:800;
 }
 
 .events {
-    margin-top: 15px;
-    height: 350px;
-    overflow: auto;
-    padding-right: 6px;
+    height:350px;
+    overflow:auto;
+    margin-top:15px;
 }
 
 .event {
-    display: grid;
-    grid-template-columns: 75px 155px 1fr;
-    gap: 10px;
-    padding: 11px 4px;
-    border-bottom: 1px solid rgba(255,255,255,.055);
-    font-size: 12px;
+    padding:10px 3px;
+    border-bottom:1px solid #202b40;
+    font-size:12px;
 }
 
-.event-time {
-    color: #66738b;
+.event .time {
+    color:#65728a;
 }
 
-.event-agent {
-    color: #9fb7ff;
-    font-weight: 700;
+.event .agent-name {
+    color:#91adff;
+    font-weight:800;
+    margin:3px 0;
 }
 
-.event-message {
-    color: #d8dfeb;
+pre {
+    background:#050912;
+    padding:15px;
+    border-radius:12px;
+    overflow:auto;
+    max-height:600px;
+    font-size:12px;
+    line-height:1.6;
 }
 
-.result {
-    padding: 20px;
-}
-
-.result pre {
-    margin: 15px 0 0;
-    padding: 18px;
-    overflow: auto;
-    max-height: 650px;
-
-    background: #050811;
-    border: 1px solid var(--border);
-    border-radius: 14px;
-
-    color: #cdd8ec;
-    font-family:
-        "SFMono-Regular",
-        Consolas,
-        monospace;
-
-    font-size: 12px;
-    line-height: 1.65;
-}
-
-.empty {
-    color: var(--muted);
-    padding: 30px 0;
-    text-align: center;
+.info {
+    color:var(--muted);
+    font-size:12px;
+    line-height:1.6;
+    margin-top:15px;
 }
 
 .error {
-    color: #ff9aaa;
-    background: rgba(255,93,115,.08);
-    border: 1px solid rgba(255,93,115,.15);
-    padding: 15px;
-    border-radius: 13px;
-    margin-top: 15px;
+    color:#ff9baa;
+    background:#2a1018;
+    padding:12px;
+    border-radius:10px;
+    margin-top:12px;
 }
 
 .login {
-    position: fixed;
-    inset: 0;
-    display: grid;
-    place-items: center;
-    background: #050811;
-    z-index: 9999;
+    position:fixed;
+    inset:0;
+    display:grid;
+    place-items:center;
+    background:#050912;
+    z-index:10;
 }
 
 .login-box {
-    width: min(390px, calc(100% - 30px));
-    padding: 28px;
-}
-
-.login-box h2 {
-    margin-top: 0;
+    width:min(390px,calc(100% - 30px));
 }
 
 .hidden {
-    display: none !important;
+    display:none !important;
 }
 
-@media (max-width: 1050px) {
+@media(max-width:900px) {
+
     .grid {
-        grid-template-columns: 1fr;
+        grid-template-columns:1fr;
     }
 
-    .controls {
-        height: auto;
+    .metrics {
+        grid-template-columns:repeat(2,1fr);
     }
+
 }
 
-@media (max-width: 700px) {
-    .container {
-        width: min(100% - 20px, 1500px);
-        padding-top: 14px;
+@media(max-width:500px) {
+
+    .metrics {
+        grid-template-columns:1fr 1fr;
     }
 
-    .header {
-        align-items: flex-start;
-    }
-
-    .top-cards {
-        grid-template-columns: repeat(2, 1fr);
-    }
-
-    .event {
-        grid-template-columns: 65px 1fr;
-    }
-
-    .event-message {
-        grid-column: 2;
-    }
 }
 
 </style>
+
 </head>
 
 <body>
 
 <div id="login" class="login hidden">
+
     <div class="card login-box">
+
         <div class="brand">
-            <div class="logo">TA</div>
+
+            <div class="logo">
+                TA
+            </div>
+
             <div>
                 <h1>TradingAgents</h1>
-                <p>Private Command Center</p>
+                <div class="subtitle">
+                    Private Command Center
+                </div>
             </div>
+
         </div>
 
-        <label class="label">Password</label>
+        <label>Password</label>
 
         <input
             id="password"
             type="password"
-            placeholder="Enter password"
-            autocomplete="current-password"
-        />
+            placeholder="Password"
+        >
 
         <button onclick="login()">
-            Unlock dashboard
+            Unlock
         </button>
 
-        <div id="loginError" class="error hidden">
+        <div
+            id="loginError"
+            class="error hidden"
+        >
             Invalid password.
         </div>
+
     </div>
+
 </div>
 
 
 <div id="app" class="container hidden">
 
-    <header class="header">
+    <div class="header">
 
         <div class="brand">
-            <div class="logo">TA</div>
+
+            <div class="logo">
+                TA
+            </div>
 
             <div>
-                <h1>TradingAgents Command Center</h1>
-                <p>Multi-agent financial research dashboard</p>
+                <h1>
+                    TradingAgents Command Center
+                </h1>
+
+                <div class="subtitle">
+                    TradingAgents → OmniRouter → OpenRouter
+                </div>
             </div>
+
         </div>
 
-        <div class="badge">
-            <span class="dot"></span>
-            <span id="connection">Ready</span>
+        <div id="connection">
+            Ready
         </div>
 
-    </header>
+    </div>
 
 
     <div class="grid">
 
-        <aside class="card controls">
+        <div class="card">
 
             <h2>New Analysis</h2>
 
-            <label class="label">
-                Ticker
-            </label>
+            <label>Ticker</label>
 
             <input
                 id="ticker"
                 value="NVDA"
-                placeholder="AAPL, NVDA, SPY, BTC-USD..."
-            />
+                placeholder="AAPL, NVDA, SPY, BTC-USD"
+            >
 
-            <label class="label">
-                Analysis date
-            </label>
+            <label>Analysis date</label>
 
             <input
                 id="date"
                 type="date"
-            />
+            >
 
             <button
                 id="startButton"
@@ -1108,145 +1073,118 @@ button:disabled {
             </button>
 
             <div class="info">
-                <b>Model</b><br>
-                <span id="model">Loading...</span>
-                <br><br>
 
                 <b>Provider</b><br>
-                OpenAI-compatible / OmniRouter
+
+                OpenAI-compatible
+
+                <br><br>
+
+                <b>Gateway</b><br>
+
+                OmniRouter
+
+                <br><br>
+
+                <b>Model</b><br>
+
+                <span id="model">
+                    Loading...
+                </span>
+
             </div>
 
-        </aside>
+        </div>
 
 
-        <main class="main">
+        <div>
 
-            <div class="top-cards">
+            <div class="metrics">
 
                 <div class="card metric">
-                    <div class="metric-label">
-                        Status
-                    </div>
-
-                    <div
-                        id="status"
-                        class="metric-value"
-                    >
+                    <small>Status</small>
+                    <strong id="status">
                         Ready
-                    </div>
+                    </strong>
                 </div>
 
                 <div class="card metric">
-                    <div class="metric-label">
-                        Ticker
-                    </div>
-
-                    <div
-                        id="metricTicker"
-                        class="metric-value"
-                    >
+                    <small>Ticker</small>
+                    <strong id="metricTicker">
                         —
-                    </div>
+                    </strong>
                 </div>
 
                 <div class="card metric">
-                    <div class="metric-label">
-                        Active Agent
-                    </div>
-
-                    <div
-                        id="metricAgent"
-                        class="metric-value"
-                    >
+                    <small>Agent</small>
+                    <strong id="metricAgent">
                         —
-                    </div>
+                    </strong>
                 </div>
 
                 <div class="card metric">
-                    <div class="metric-label">
-                        Phase
-                    </div>
-
-                    <div
-                        id="metricPhase"
-                        class="metric-value"
-                    >
+                    <small>Phase</small>
+                    <strong id="metricPhase">
                         —
-                    </div>
+                    </strong>
                 </div>
 
             </div>
 
 
-            <section class="card progress-card">
+            <div class="card progress">
 
-                <div class="progress-head">
+                <b>Analysis Progress</b>
 
-                    <div>
-                        <div class="card-title">
-                            Analysis Progress
-                        </div>
+                <span
+                    id="progressNumber"
+                    style="float:right;color:#6e98ff"
+                >
+                    0%
+                </span>
 
-                        <div
-                            id="progressText"
-                            style="
-                                color:var(--muted);
-                                margin-top:5px;
-                                font-size:12px;
-                            "
-                        >
-                            Waiting for an analysis
-                        </div>
-                    </div>
-
-                    <div
-                        id="progressNumber"
-                        class="progress-number"
-                    >
-                        0%
-                    </div>
-
+                <div
+                    id="progressText"
+                    class="subtitle"
+                >
+                    Waiting
                 </div>
 
-                <div class="progress-track">
+                <div class="track">
+
                     <div
                         id="progressBar"
-                        class="progress-bar"
+                        class="bar"
                     ></div>
+
                 </div>
 
-            </section>
+            </div>
 
 
-            <section class="card agent-window">
+            <div class="card">
 
-                <div class="card-title">
-                    Live Agent Activity
-                </div>
+                <b>Live Agent Activity</b>
 
-                <div class="agent-status">
+                <div class="agent">
 
-                    <div
-                        id="agentAvatar"
-                        class="agent-avatar"
-                    >
+                    <div class="agent-icon">
                         AI
                     </div>
 
                     <div>
-                        <div
-                            id="activeAgent"
-                            class="agent-name"
-                        >
+
+                        <strong id="activeAgent">
                             No agent running
-                        </div>
+                        </strong>
 
                         <div
                             id="activePhase"
-                            class="agent-phase"
+                            class="subtitle"
                         >
-                            Start an analysis to see the live workflow.
+                            Start an analysis.
                         </div>
+
                     </div>
 
                     <div
@@ -1262,30 +1200,26 @@ button:disabled {
                     id="events"
                     class="events"
                 >
-                    <div class="empty">
-                        The agent activity will appear here.
-                    </div>
+                    Waiting for activity...
                 </div>
 
-            </section>
+            </div>
 
 
-            <section class="card result">
+            <div
+                class="card"
+                style="margin-top:15px"
+            >
 
-                <div class="card-title">
-                    Final Analysis
-                </div>
+                <b>Final Analysis</b>
 
-                <div
-                    id="result"
-                    class="empty"
-                >
+                <div id="result">
                     No completed analysis yet.
                 </div>
 
-            </section>
+            </div>
 
-        </main>
+        </div>
 
     </div>
 
@@ -1318,19 +1252,31 @@ async function api(url, options = {}) {
         ...authHeaders()
     };
 
-    const response = await fetch(url, options);
+    const response =
+        await fetch(url, options);
 
     if (response.status === 401) {
+
         showLogin();
-        throw new Error("Authentication required");
+
+        throw new Error(
+            "Authentication required"
+        );
     }
 
     if (!response.ok) {
-        let text = await response.text();
+
+        let text =
+            await response.text();
 
         try {
-            const data = JSON.parse(text);
-            text = data.detail || text;
+
+            const data =
+                JSON.parse(text);
+
+            text =
+                data.detail || text;
+
         } catch {}
 
         throw new Error(text);
@@ -1428,7 +1374,8 @@ async function loadConfig() {
         document
             .getElementById("model")
             .textContent =
-            data.model || "Unknown";
+            data.model ||
+            "Not configured";
 
     } catch {}
 
@@ -1437,7 +1384,7 @@ async function loadConfig() {
         .value =
         new Date()
             .toISOString()
-            .slice(0, 10);
+            .slice(0,10);
 }
 
 
@@ -1455,7 +1402,11 @@ async function startAnalysis() {
             .value;
 
     if (!ticker) {
-        alert("Please enter a ticker.");
+
+        alert(
+            "Please enter a ticker."
+        );
+
         return;
     }
 
@@ -1464,12 +1415,14 @@ async function startAnalysis() {
             .getElementById("startButton");
 
     button.disabled = true;
-    button.textContent = "Starting...";
+
+    button.textContent =
+        "Starting...";
 
     document
         .getElementById("result")
         .innerHTML =
-        '<div class="empty">Analysis running...</div>';
+        "<div>Analysis running...</div>";
 
     document
         .getElementById("events")
@@ -1481,21 +1434,22 @@ async function startAnalysis() {
             await api(
                 "/api/analyze",
                 {
-                    method: "POST",
+                    method:"POST",
 
-                    headers: {
+                    headers:{
                         "Content-Type":
                             "application/json"
                     },
 
-                    body: JSON.stringify({
-                        ticker: ticker,
-                        analysis_date: date
+                    body:JSON.stringify({
+                        ticker:ticker,
+                        analysis_date:date
                     })
                 }
             );
 
-        jobId = data.job_id;
+        jobId =
+            data.job_id;
 
         document
             .getElementById("connection")
@@ -1504,11 +1458,12 @@ async function startAnalysis() {
 
         poll();
 
-    } catch (error) {
+    } catch(error) {
 
         alert(error.message);
 
         button.disabled = false;
+
         button.textContent =
             "Start Analysis";
     }
@@ -1517,13 +1472,16 @@ async function startAnalysis() {
 
 async function poll() {
 
-    if (!jobId) return;
+    if (!jobId) {
+        return;
+    }
 
     try {
 
         const job =
             await api(
-                "/api/jobs/" + jobId
+                "/api/jobs/" +
+                jobId
             );
 
         renderJob(job);
@@ -1542,23 +1500,29 @@ async function poll() {
         } else {
 
             document
-                .getElementById("startButton")
+                .getElementById(
+                    "startButton"
+                )
                 .disabled = false;
 
             document
-                .getElementById("startButton")
+                .getElementById(
+                    "startButton"
+                )
                 .textContent =
                 "Start Analysis";
 
             document
-                .getElementById("connection")
+                .getElementById(
+                    "connection"
+                )
                 .textContent =
                 job.status === "completed"
                     ? "Completed"
                     : "Failed";
         }
 
-    } catch (error) {
+    } catch(error) {
 
         console.error(error);
 
@@ -1609,12 +1573,14 @@ function renderJob(job) {
     document
         .getElementById("progressText")
         .textContent =
-        job.current_phase || "Working...";
+        job.current_phase ||
+        "Working...";
 
     document
         .getElementById("activeAgent")
         .textContent =
-        job.current_agent || "System";
+        job.current_agent ||
+        "System";
 
     document
         .getElementById("activePhase")
@@ -1628,17 +1594,15 @@ function renderJob(job) {
             ? "LIVE"
             : job.status.toUpperCase();
 
-    renderEvents(job.events || []);
+    renderEvents(
+        job.events || []
+    );
 
     if (job.status === "completed") {
 
-        const result =
-            document
-                .getElementById("result");
-
-        result.className = "";
-
-        result.innerHTML =
+        document
+            .getElementById("result")
+            .innerHTML =
             "<pre>" +
             escapeHtml(
                 JSON.stringify(
@@ -1674,9 +1638,7 @@ function renderEvents(events) {
     if (!events.length) {
 
         container.innerHTML =
-            '<div class="empty">' +
-            'Waiting for agent activity...' +
-            '</div>';
+            "Waiting for activity...";
 
         return;
     }
@@ -1692,21 +1654,25 @@ function renderEvents(events) {
 
                 return `
                     <div class="event">
-                        <div class="event-time">
+
+                        <div class="time">
                             ${escapeHtml(time)}
                         </div>
 
-                        <div class="event-agent">
+                        <div class="agent-name">
                             ${escapeHtml(
-                                event.agent || "System"
+                                event.agent ||
+                                "System"
                             )}
                         </div>
 
-                        <div class="event-message">
+                        <div>
                             ${escapeHtml(
-                                event.message || ""
+                                event.message ||
+                                ""
                             )}
                         </div>
+
                     </div>
                 `;
 
@@ -1721,11 +1687,26 @@ function renderEvents(events) {
 function escapeHtml(value) {
 
     return String(value)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#039;");
+        .replaceAll(
+            "&",
+            "&amp;"
+        )
+        .replaceAll(
+            "<",
+            "&lt;"
+        )
+        .replaceAll(
+            ">",
+            "&gt;"
+        )
+        .replaceAll(
+            '"',
+            "&quot;"
+        )
+        .replaceAll(
+            "'",
+            "&#039;"
+        );
 }
 
 
@@ -1738,19 +1719,32 @@ boot();
 """
 
 
-@app.get("/", response_class=HTMLResponse)
+# ============================================================
+# HOME
+# ============================================================
+
+@app.get(
+    "/",
+    response_class=HTMLResponse,
+)
 def home():
     return HTML
 
+
+# ============================================================
+# 401 HANDLER
+# ============================================================
 
 @app.exception_handler(401)
 async def unauthorized(
     request: Request,
     exc: HTTPException,
 ):
+
     return JSONResponse(
         status_code=401,
         content={
-            "error": "Authentication required"
+            "error":
+                "Authentication required"
         },
     )
