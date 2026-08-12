@@ -318,12 +318,16 @@ def run_analysis(
             "OPENAI_COMPATIBLE_API_KEY"
         ] = API_KEY
 
-        # Also expose the key through OPENAI_API_KEY.
-        # Some OpenAI-compatible client versions
-        # look for this variable.
-        os.environ[
-            "OPENAI_API_KEY"
-        ] = API_KEY
+        # Expose keys across standard environment variable aliases
+        os.environ["OPENAI_API_KEY"] = API_KEY
+        os.environ["OPENROUTER_API_KEY"] = API_KEY
+        os.environ["OPENAI_BASE_URL"] = BACKEND_URL
+        os.environ["OPENAI_API_BASE"] = BACKEND_URL
+
+        # Verhindert, dass LiteLLM das Modell als nativen Provider "nvidia" abfängt
+        sanitized_model = MODEL
+        if sanitized_model.startswith("nvidia/") and not sanitized_model.startswith("openrouter/"):
+            sanitized_model = f"openrouter/{sanitized_model}"
 
         # ----------------------------------------------------
         # TradingAgents configuration
@@ -335,14 +339,14 @@ def run_analysis(
             "openai_compatible"
         )
 
-        config["deep_think_llm"] = MODEL
-        config["quick_think_llm"] = MODEL
+        config["deep_think_llm"] = sanitized_model
+        config["quick_think_llm"] = sanitized_model
 
         config["backend_url"] = BACKEND_URL
 
         add_event(
             job_id,
-            f"Model: {MODEL}",
+            f"Model: {sanitized_model}",
             "System",
             "LLM configuration",
             7,
