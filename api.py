@@ -8,6 +8,7 @@ import urllib.error
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+import yfinance as yf
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -51,8 +52,8 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 
 app = FastAPI(
     title="TradingAgents Enterprise Command Center",
-    version="4.7.0",
-    description="Multi-Agent Market Analysis Orchestrator with On-Demand GitHub Gist Loading",
+    version="4.8.0",
+    description="Multi-Agent Market Analysis Orchestrator with Real Market Data Scan",
 )
 
 
@@ -219,7 +220,6 @@ def list_github_gists(request: Request):
             gists = json.loads(response.read().decode('utf-8'))
             results = []
             for g in gists:
-                # Prüfen ob es ein TradingAgents Gist ist
                 for filename in g.get("files", {}):
                     if filename.startswith("tradingagents_"):
                         results.append({
@@ -254,7 +254,6 @@ def load_github_gist(gist_id: str, request: Request):
                 if filename.startswith("tradingagents_"):
                     content = json.loads(file_info["content"])
                     job_id = content["id"]
-                    # In den lokalen Speicher legen, damit UI es anzeigen kann
                     with jobs_lock:
                         jobs[job_id] = content
                     return {"status": "loaded", "job_id": job_id, "data": content}
@@ -453,7 +452,7 @@ def run_analysis(job_id: str, ticker: str, analysis_date: str, portfolio: list =
 # API ENDPOINTS
 # ============================================================
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "POST"])
 def health():
     return {"status": "healthy", "timestamp": utc_now()}
 
@@ -530,15 +529,50 @@ def get_job_debug_logs(job_id: str, request: Request):
 @app.get("/api/market_scan")
 def market_scan(request: Request):
     check_password(request)
+    # Echte Live-Daten per yfinance für eine Auswahl beliebter Aktien abfragen
+    watchlist = ["NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "PLTR", "CRWD", "LLY"]
+    recommendations = []
+
+    try:
+        data = yf.download(watchlist, period="5d", group_by="ticker", progress=False)
+        for ticker in watchlist:
+            try:
+                df = data[ticker] if len(watchlist) > 1 else data
+                if df is not None and not df.empty and len(df) >= 2:
+                    close_prices = df['Close'].dropna()
+                    if len(close_prices) >= 2:
+                        last_close = float(close_prices.iloc[-1])
+                        prev_close = float(close_prices.iloc[-2])
+                        change_pct = ((last_close - prev_close) / prev_close) * 100
+                        
+                        signal = "Buy" if change_pct >= 0 else "Hold"
+                        if change_pct > 2.5:
+                            signal = "Strong Buy"
+                        elif change_pct < -2.5:
+                            signal = "Watch / Dip"
+
+                        recommendations.append({
+                            "ticker": ticker,
+                            "name": ticker,
+                            "price": round(last_close, 2),
+                            "change_pct": round(change_pct, 2),
+                            "signal": signal,
+                            "reason": f"Live YFinance Daten: Letzter Kurs ${round(last_close, 2)} ({round(change_pct, 2)}% zum Vortag)"
+                        })
+            except Exception:
+                continue
+    except Exception as e:
+        # Fallback falls Yahoo blockiert oder offline ist
+        pass
+
+    if not recommendations:
+        recommendations = [
+            {"ticker": "NVDA", "name": "NVIDIA Corp", "price": 0.0, "change_pct": 0.0, "signal": "Hold", "reason": "Live-Abfrage aktuell nicht erreichbar."},
+        ]
+
     return {
         "timestamp": utc_now(),
-        "recommendations": [
-            {"ticker": "NVDA", "name": "NVIDIA Corp", "sector": "Technology", "signal": "Strong Buy", "reason": "High AI momentum & earnings growth."},
-            {"ticker": "CRWD", "name": "CrowdStrike Holdings", "sector": "Cybersecurity", "signal": "Buy", "reason": "Favorable technical setup after recent pullback."},
-            {"ticker": "LLY", "name": "Eli Lilly and Co", "sector": "Healthcare", "signal": "Buy", "reason": "Strong GLP-1 sales driving revenue upgrades."},
-            {"ticker": "SAP", "name": "SAP SE", "sector": "Software", "signal": "Buy", "reason": "Cloud revenue acceleration."},
-            {"ticker": "PLTR", "name": "Palantir Technologies", "sector": "Data Analytics", "signal": "Hold", "reason": "Valuation premium, but strong commercial growth."}
-        ]
+        "recommendations": recommendations
     }
 
 
@@ -831,7 +865,7 @@ HTML = r"""
                 <input id="inputDate" type="date">
 
                 <button id="btnRun" class="btn-primary" onclick="launchAnalysis()">🚀 Run Pipeline</button>
-                <button class="btn-secondary" style="width: 100%; margin-top: 8px; justify-content: center;" onclick="switchTab('tabMarketScan')">🔍 Market Scan (Ideen)</button>
+                <button class="btn-secondary" style="width: 100%; margin-top: 8px; justify-content: center;" onclick="switchTab('tabMarketScan')">🔍 Live Market Scan</button>
             </div>
 
             <div class="card">
@@ -841,13 +875,12 @@ HTML = r"""
                 </div>
             </div>
 
-            <!-- NEU: GitHub Gists nur auf Klick laden -->
             <div class="card">
                 <div class="card-title">
                     <span>GitHub Gist Archive</span>
                     <button class="btn-secondary" onclick="loadGitHubGistsList()" style="font-size: 10px; padding: 2px 6px;">Laden</button>
                 </div>
-                <p style="font-size: 11px; color: var(--text-dim); margin-bottom: 8px;">Klicke auf "Laden", um gespeicherte Analysen aus GitHub abzurufen (bleiben unberührt, bis du sie anklickst).</p>
+                <p style="font-size: 11px; color: var(--text-dim); margin-bottom: 8px;">Klicke auf "Laden", um gespeicherte Analysen aus GitHub abzurufen (nur auf Klick).</p>
                 <div id="gistHistoryList" class="job-history-list">
                     <div style="color: var(--text-dim); font-size: 11px;">Nicht geladen. Klicke oben auf Laden.</div>
                 </div>
@@ -920,12 +953,12 @@ HTML = r"""
             <div id="tabMarketScan" class="tab-content">
                 <div class="card">
                     <div class="card-title">
-                        <span>Automatischer Markt-Scan</span>
-                        <button class="btn-secondary" onclick="runMarketScan()">🔄 Scannen</button>
+                        <span>Echter Live-Markt-Scan (YFinance)</span>
+                        <button class="btn-secondary" onclick="runMarketScan()">🔄 Echte Daten scannen</button>
                     </div>
-                    <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 16px;">Hier findest du potenziell interessante Aktien. Klicke auf eine Zeile, um sie zu analysieren.</p>
+                    <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 16px;">Ruft in Echtzeit die Live-Kurse von Yahoo Finance ab. Klicke auf eine Zeile zur Analyse.</p>
                     <div id="marketScanResults" style="overflow-x: auto;">
-                        <div style="color:var(--text-dim); font-size:12px;">Klicke auf Scannen, um Empfehlungen zu erhalten.</div>
+                        <div style="color:var(--text-dim); font-size:12px;">Klicke auf "Echte Daten scannen", um den Live-Markt abzufragen.</div>
                     </div>
                 </div>
             </div>
@@ -1060,7 +1093,6 @@ async function loadHistory() {
     }
 }
 
-// GitHub Gists nur auf Klick laden
 async function loadGitHubGistsList() {
     const listEl = document.getElementById("gistHistoryList");
     listEl.innerHTML = `<div style="color: var(--text-dim); font-size: 11px;">Lade Gists von GitHub...</div>`;
@@ -1225,29 +1257,30 @@ function removePortfolioItem(index) {
 
 async function runMarketScan() {
     const container = document.getElementById("marketScanResults");
-    container.innerHTML = "Scanne Markt...";
+    container.innerHTML = "Frage echte Marktdaten via YFinance ab...";
     try {
         const res = await request("/api/market_scan");
         if(res.recommendations && res.recommendations.length > 0) {
             let html = `<table class="market-scan-table">
-                <thead><tr><th>Ticker</th><th>Unternehmen</th><th>Sektor</th><th>Signal</th><th>Grund</th></tr></thead>
+                <thead><tr><th>Ticker</th><th>Letzter Kurs</th><th>24h Änderung</th><th>Signal</th><th>Live-Notiz</th></tr></thead>
                 <tbody>`;
             res.recommendations.forEach(r => {
+                const colorClass = r.change_pct >= 0 ? 'var(--accent-emerald)' : 'var(--accent-rose)';
                 html += `<tr onclick="document.getElementById('inputTicker').value='${r.ticker}'; window.scrollTo(0,0);">
                     <td><b>${r.ticker}</b></td>
-                    <td>${r.name}</td>
-                    <td>${r.sector}</td>
-                    <td style="color: ${r.signal.includes('Buy') ? 'var(--accent-emerald)' : 'var(--accent-amber)'}">${r.signal}</td>
+                    <td>$${r.price}</td>
+                    <td style="color: ${colorClass};">${r.change_pct > 0 ? '+' : ''}${r.change_pct}%</td>
+                    <td><span class="badge ${r.signal.includes('Buy') ? 'completed' : 'queued'}">${r.signal}</span></td>
                     <td style="color: var(--text-muted);">${r.reason}</td>
                 </tr>`;
             });
             html += `</tbody></table>`;
             container.innerHTML = html;
         } else {
-            container.innerHTML = "Keine Empfehlungen gefunden.";
+            container.innerHTML = "Keine Live-Daten empfangen.";
         }
     } catch(e) {
-        container.innerHTML = "Fehler beim Scan: " + escapeHtml(e.message);
+        container.innerHTML = "Fehler beim Live-Scan: " + escapeHtml(e.message);
     }
 }
 
